@@ -1,3 +1,4 @@
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/71f5aaf1-04ee-455a-99d8-a26702e769f1" />
 # AI PR Security Analyzer
 
 AI PR Security Analyzer is a FastAPI webhook service that reviews GitHub pull requests for risky code changes. It combines static analysis, custom Semgrep rules, lightweight fallback checks, and optional OpenAI analysis to produce security findings, PR scores, summary comments, and inline comments on vulnerable lines.
