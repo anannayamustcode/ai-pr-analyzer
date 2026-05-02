@@ -66,7 +66,7 @@ def post_pr_comment(repo, pr_number, token, body):
     return response.json()
 
 
-def post_pr_inline_comment(repo, pr_number, token, body, path, position, commit_id):
+def post_pr_inline_comment(repo, pr_number, token, body, path, line, commit_id):
     url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/comments"
 
     response = requests.post(
@@ -78,7 +78,8 @@ def post_pr_inline_comment(repo, pr_number, token, body, path, position, commit_
         json={
             "body": body,
             "path": path,
-            "position": position,
+            "line": line,
+            "side": "RIGHT",
             "commit_id": commit_id,
         },
     )
