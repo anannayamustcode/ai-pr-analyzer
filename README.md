@@ -11,9 +11,11 @@ AI PR Security Analyzer is a FastAPI webhook service that reviews GitHub pull re
 - Falls back to built-in Python checks when Semgrep is unavailable.
 - Optionally sends the diff and surrounding context to OpenAI for deeper review.
 - Merges and deduplicates static and AI findings.
+- Runs high-severity findings through a Docker-based exploit simulation sandbox.
 - Scores each file and the overall PR from `0` to `100`.
 - Posts a Markdown summary comment on the PR.
 - Posts inline comments on exact vulnerable diff lines.
+- Marks confirmed exploitability in the PR summary when simulation succeeds.
 
 ## Current Checks
 
@@ -36,6 +38,12 @@ app/
     diff_parser.py       # Added-line extraction and diff position mapping
     findings.py          # Merge, dedupe, scoring, and summary formatting
     semgrep_runner.py    # Semgrep runner and fallback static checks
+  exploit_sim/
+    payload_gen.py       # Generates safe proof-of-concept simulation payloads
+    sandbox.py           # Runs high-severity findings in the Docker sandbox
+    harness/
+      Dockerfile         # Container image for exploit simulations
+      runner.py          # Isolated simulation runner
   github/
     client.py            # GitHub API helpers
     webhook.py           # GitHub webhook handler
@@ -50,6 +58,7 @@ requirements.txt
 - Python 3.11+
 - GitHub App with webhook access
 - GitHub App private key
+- Docker Desktop, for exploit simulation
 - Semgrep installed and available on `PATH`
 - OpenAI API key, optional but recommended
 
@@ -57,14 +66,32 @@ Install dependencies:
 
 ```powershell
 python -m pip install -r requirements.txt
-python -m pip install fastapi uvicorn python-dotenv pyjwt requests semgrep
+python -m pip install fastapi uvicorn python-dotenv pyjwt requests semgrep docker
 ```
 
 If `python` is not recognized on Windows, try:
 
 ```powershell
 py -m pip install -r requirements.txt
-py -m pip install fastapi uvicorn python-dotenv pyjwt requests semgrep
+py -m pip install fastapi uvicorn python-dotenv pyjwt requests semgrep docker
+```
+
+Build the exploit simulation sandbox image:
+
+```powershell
+docker build -t pr-exploit-sandbox:latest app/exploit_sim/harness
+```
+
+Verify the image exists:
+
+```powershell
+docker images pr-exploit-sandbox
+```
+
+Expected output includes:
+
+```text
+pr-exploit-sandbox   latest
 ```
 
 ## Environment Variables
@@ -77,6 +104,8 @@ GITHUB_WEBHOOK_SECRET=your_webhook_secret
 GITHUB_PRIVATE_KEY_PATH=path/to/your-github-app-private-key.pem
 OPENAI_API_KEY=your_openai_api_key
 OPENAI_MODEL=gpt-4o
+ENABLE_EXPLOIT_SIMULATION=true
+EXPLOIT_SIM_TIMEOUT=12
 ```
 
 Notes:
@@ -84,6 +113,8 @@ Notes:
 - Do not commit `.env`.
 - Do not commit your GitHub App private key.
 - `OPENAI_MODEL` is optional. If omitted, the app defaults to `gpt-4o`.
+- `ENABLE_EXPLOIT_SIMULATION=false` disables Docker simulation and keeps static/AI review running.
+- `EXPLOIT_SIM_TIMEOUT` controls Docker client timeout for exploit simulation.
 - If OpenAI quota is unavailable or the SDK fails, AI analysis is skipped and static analysis still runs.
 
 ## GitHub App Setup
@@ -142,9 +173,10 @@ POST /webhook
 5. Static analysis runs through Semgrep and fallback Python checks.
 6. OpenAI analysis runs with filename, added lines, and surrounding patch context.
 7. Static and AI findings are normalized, merged, and deduplicated.
-8. The analyzer calculates file and PR security scores.
-9. The app posts inline comments on vulnerable changed lines.
-10. The app posts a summary comment on the PR.
+8. High-severity findings are sent to the Docker exploit simulation sandbox.
+9. The analyzer calculates file and PR security scores.
+10. The app posts inline comments on vulnerable changed lines.
+11. The app posts a summary comment on the PR, including exploit confirmation evidence when available.
 
 ## Security Score
 
@@ -173,9 +205,10 @@ The PR summary comment looks like this:
 
 **Security Score: 78/100**
 
-[HIGH] eval used (line 2)
-_Fix:_ Remove eval.
-[MEDIUM] random used (line 5)
+🔴 **HIGH** - Use of eval()/exec() can execute untrusted code (line 2)
+   🔥 **EXPLOIT CONFIRMED**
+   Evidence: `Payload executed in eval context. Output: EXPLOITED`
+🟡 **MEDIUM** - random used (line 5)
 ```
 
 ## Inline Comments
@@ -187,6 +220,54 @@ POST /repos/{repo}/pulls/{pr_number}/comments
 ```
 
 GitHub requires a diff `position`, not the source file line number. The app maps the finding's added-line number back to the unified diff position before posting.
+
+## Exploit Simulation
+
+High-severity findings are passed to `simulate_all()` after static and AI results are merged. The simulator generates safe proof-of-concept payloads and runs them inside the `pr-exploit-sandbox:latest` Docker image with:
+
+- no network access
+- memory limits
+- CPU limits
+- read-only filesystem
+- non-root sandbox user
+
+Simulation results are attached to findings:
+
+```python
+{
+    "simulated": True,
+    "exploit_confirmed": True,
+    "simulation_evidence": "Payload executed in eval context. Output: EXPLOITED"
+}
+```
+
+Run a local smoke test:
+
+```powershell
+@'
+from app.exploit_sim.sandbox import simulate_all
+
+findings = [
+    {"issue": "Use of eval()/exec() can execute untrusted code", "severity": "HIGH", "line_hint": 1},
+    {"issue": "Possible hardcoded secret", "severity": "HIGH", "line_hint": 2},
+    {"issue": "SQL query built with an f-string may allow injection", "severity": "HIGH", "line_hint": 3},
+    {"issue": "Use of os.system() can execute shell commands", "severity": "HIGH", "line_hint": 4},
+]
+
+lines = [
+    "eval(user_input)",
+    "DB_PASSWORD = \"admin123\"",
+    "query = f\"SELECT * FROM users WHERE id={uid}\"",
+    "os.system(f\"rm -rf {path}\")",
+]
+
+for result in simulate_all(findings, lines):
+    status = "CONFIRMED" if result.get("exploit_confirmed") else "not triggered"
+    print(f"{status} - {result['issue']}")
+    if result.get("simulation_evidence"):
+        print(f"  Evidence: {result['simulation_evidence'][:100]}")
+'@ | python -
+```
 
 ## Troubleshooting
 
@@ -213,6 +294,26 @@ semgrep --version
 ```
 
 If Semgrep still fails, the app uses fallback checks for critical patterns.
+
+### Exploit simulation does not run
+
+Install the Docker Python SDK:
+
+```powershell
+python -m pip install docker
+```
+
+Rebuild the sandbox image:
+
+```powershell
+docker build -t pr-exploit-sandbox:latest app/exploit_sim/harness
+```
+
+Verify Docker Desktop is running and the image exists:
+
+```powershell
+docker images pr-exploit-sandbox
+```
 
 ## Safety Notes
 

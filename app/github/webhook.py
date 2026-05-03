@@ -6,9 +6,10 @@ import os
 from fastapi import APIRouter, HTTPException, Request
 
 from app.analyzer.ai_analyzer import ai_analyze
-from app.analyzer.diff_parser import diff_position_for_added_line, extract_added_lines
+from app.analyzer.diff_parser import extract_added_lines, new_file_line_for_added_line
 from app.analyzer.findings import format_summary, merge_findings, score
 from app.analyzer.semgrep_runner import run_semgrep
+from app.exploit_sim.sandbox import simulate_all
 from app.github.client import (
     get_installation_token,
     get_pr_files,
@@ -50,9 +51,9 @@ def _post_inline_comments(repo, pr_number, token, commit_id, filename, patch, fi
         if issue["severity"] == "INFO":
             continue
 
-        position = diff_position_for_added_line(patch, issue["line"])
-        if position is None:
-            print(f"Could not map finding to diff position: {filename}:{issue['line']}")
+        comment_line = new_file_line_for_added_line(patch, issue["line"])
+        if comment_line is None:
+            print(f"Could not map finding to file line: {filename}:{issue['line']}")
             continue
 
         try:
@@ -62,12 +63,15 @@ def _post_inline_comments(repo, pr_number, token, commit_id, filename, patch, fi
                 token=token,
                 body=_inline_comment_body(issue),
                 path=filename,
-                position=position,
+                line=comment_line,
                 commit_id=commit_id,
             )
-            print(f"Posted inline comment on {filename} at diff position {position}")
+            print(f"Posted inline comment on {filename} at file line {comment_line}")
         except Exception as error:
-            print(f"Failed to post inline comment on {filename}:{issue['line']}: {error}")
+            response_body = ""
+            if getattr(error, "response", None) is not None:
+                response_body = f" | response: {error.response.text}"
+            print(f"Failed to post inline comment on {filename}:{issue['line']}: {error}{response_body}")
 
 
 @router.post("/webhook")
@@ -115,6 +119,7 @@ async def webhook(request: Request):
             static_findings = run_semgrep(code, filename)
             ai_findings = ai_analyze(filename, code, context=patch)
             findings = merge_findings(static_findings, ai_findings)
+            findings = simulate_all(findings, added_lines)
             pr_findings.extend(findings)
 
             print(f"File security score: {score(findings)}/100")

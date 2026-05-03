@@ -83,11 +83,20 @@ def format_summary(findings: list[dict], security_score: int) -> str:
             issue = finding.get("issue") or finding.get("message")
             line = finding.get("line_hint") or finding.get("line")
 
-            lines.append(f"{icon} **{severity}** - {issue} (line {line})")
+            if finding.get("simulated"):
+                if finding.get("exploit_confirmed"):
+                    lines.append(f"{icon} **{severity}** - {issue} (line {line})")
+                    lines.append("   🔥 **EXPLOIT CONFIRMED**")
+                    evidence = finding.get("simulation_evidence", "")
+                    if evidence:
+                        lines.append(f"   Evidence: `{evidence[:150]}`")
+                else:
+                    lines.append(f"{icon} **{severity}** - {issue} (line {line}) _(simulated - not triggered)_")
+            else:
+                lines.append(f"{icon} **{severity}** - {issue} (line {line})")
 
             if finding.get("explanation"):
                 lines.append(f"   *Why:* {finding['explanation']}")
-
             if finding.get("fix"):
                 lines.append(f"   *Fix:* {finding['fix']}")
 
