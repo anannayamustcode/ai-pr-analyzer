@@ -1,4 +1,16 @@
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+if not os.getenv("GITHUB_WEBHOOK_SECRET"):
+    raise RuntimeError(
+        "GITHUB_WEBHOOK_SECRET is not set. Add it to your environment or .env file."
+    )
+
 from fastapi import FastAPI
+
 from app.github.webhook import router
 
 app = FastAPI()
