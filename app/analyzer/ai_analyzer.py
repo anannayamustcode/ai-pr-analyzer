@@ -8,10 +8,12 @@ except ImportError:
     OpenAI = None
 
 
-SYSTEM = """You are a security engineer reviewing code changes.
-- Only report real, concrete vulnerabilities in the diff
-- If nothing is wrong, return []
-- Return ONLY valid JSON, no explanation text"""
+SYSTEM = """You are a senior security engineer and a strict triage system.
+Your job is to evaluate static analysis (Semgrep) findings, filter out false positives, adjust severities based on context, generate fixes for true positives, and identify business logic flaws that Semgrep missed.
+- If a finding is a false positive (e.g., hardcoded secret in a test file, or sanitized input), set "is_false_positive" to true.
+- If a finding is a true positive but low risk in this context, downgrade its "severity" (HIGH|MEDIUM|LOW|INFO).
+- Generate a concrete "fix" snippet for true positives.
+- Return ONLY valid JSON, no markdown explanation text."""
 
 USER_TEMPLATE = """File: {filename}
 
@@ -21,7 +23,18 @@ Surrounding context:
 Diff (added lines):
 {diff}
 
-Return JSON array: [{{"issue": str, "severity": "HIGH|MEDIUM|LOW", "line_hint": int, "explanation": str, "fix": str}}]"""
+Static analysis findings (Semgrep):
+{static_findings_json}
+
+Return a JSON array of evaluated findings plus any new business logic flaws you found: 
+[{{
+    "issue": "description", 
+    "severity": "HIGH|MEDIUM|LOW|INFO", 
+    "line_hint": int, 
+    "explanation": "Why this is a true positive or false positive", 
+    "fix": "Suggested code fix if applicable",
+    "is_false_positive": bool
+}}]"""
 
 
 def _strip_markdown_fences(raw: str) -> str:
@@ -57,6 +70,15 @@ def _normalize_findings(value) -> list[dict]:
         except (TypeError, ValueError):
             line = 1
 
+        is_fp = item.get("is_false_positive")
+        if isinstance(is_fp, str):
+            is_fp = is_fp.lower() == "true"
+        elif not isinstance(is_fp, bool):
+            is_fp = False
+            
+        if is_fp:
+            continue
+
         findings.append(
             {
                 "issue": issue.strip(),
@@ -83,21 +105,38 @@ def _parse_ai_response(raw: str) -> list[dict]:
     return _normalize_findings(parsed)
 
 
-def ai_analyze(filename: str, diff: str, context: str = "") -> list[dict]:
+def ai_analyze(filename: str, diff: str, context: str = "", static_findings: list[dict] = None) -> list[dict]:
     if OpenAI is None:
         print("OpenAI package is not installed; skipping AI analysis")
         return []
 
-    if not os.getenv("OPENAI_API_KEY"):
-        print("OPENAI_API_KEY is not set; skipping AI analysis")
+    groq_key = os.getenv("GROQ_API_KEY")
+    openai_key = os.getenv("OPENAI_API_KEY")
+
+    if not groq_key and not openai_key:
+        print("Neither GROQ_API_KEY nor OPENAI_API_KEY is set; skipping AI analysis")
         return []
 
-    client = OpenAI()
-    prompt = USER_TEMPLATE.format(filename=filename, diff=diff, context=context)
+    if static_findings is None:
+        static_findings = []
+
+    if groq_key:
+        client = OpenAI(api_key=groq_key, base_url="https://api.groq.com/openai/v1")
+        model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    else:
+        client = OpenAI(api_key=openai_key)
+        model = os.getenv("OPENAI_MODEL", "gpt-4o")
+
+    prompt = USER_TEMPLATE.format(
+        filename=filename, 
+        diff=diff, 
+        context=context,
+        static_findings_json=json.dumps(static_findings, indent=2)
+    )
 
     try:
         resp = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o"),
+            model=model,
             messages=[
                 {"role": "system", "content": SYSTEM},
                 {"role": "user", "content": prompt},
@@ -105,8 +144,8 @@ def ai_analyze(filename: str, diff: str, context: str = "") -> list[dict]:
             temperature=0.1,
         )
     except Exception as error:
-        print(f"OpenAI analysis failed: {error}")
-        return []
+        print(f"AI analysis failed: {error}")
+        return static_findings
 
     raw = resp.choices[0].message.content or ""
     return _parse_ai_response(raw)

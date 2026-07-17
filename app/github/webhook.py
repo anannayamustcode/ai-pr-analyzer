@@ -219,12 +219,19 @@ async def webhook(request: Request):
             print("Code:\n", code)
 
             static_findings = run_semgrep(code, filename)
-            ai_findings = ai_analyze(filename, code, context=patch)
-            for item in static_findings:
+            
+            if os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY"):
+                # AI triage of static findings + logic flaw detection
+                findings = ai_analyze(filename, code, context=patch, static_findings=static_findings)
+            else:
+                # Fallback to just static analysis if AI is unavailable
+                findings = static_findings
+
+            for item in findings:
                 item["filename"] = filename
-            for item in ai_findings:
-                item["filename"] = filename
-            findings = merge_findings(static_findings, ai_findings)
+                
+            # Normalize and sort (merge_findings with empty list just does this)
+            findings = merge_findings(findings, [])
             findings = simulate_all(findings, added_lines)
             pr_findings.extend(findings)
 
